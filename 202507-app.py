@@ -42,39 +42,48 @@ def get_dynamic_tick_format(df, view_mode):
     """
     根據時間視野動態生成X軸的刻度位置與標籤
     """
-    date_min = df['Start'].min()
-    date_max = df['Finish'].max()
+    # 找出整個專案的最小開始日期和最大結束日期
+    # 使用 .dropna() 避免因空值導致的錯誤
+    valid_starts = df['Start'].dropna()
+    valid_finishes = df['Finish'].dropna()
     
-    # 確保有有效的日期範圍
-    if pd.isna(date_min) or pd.isna(date_max):
-        return None, None
+    if valid_starts.empty or valid_finishes.empty:
+        return None, None # 如果沒有有效的日期，則不生成刻度
+
+    date_min = valid_starts.min()
+    date_max = valid_finishes.max()
 
     tickvals = []
     ticktext = []
 
+    # 根據選擇的視野模式生成刻度
     if view_mode == "每年":
-        years = pd.date_range(start=date_min.to_period('Y').to_timestamp(), end=date_max, freq='YS')
+        years = pd.date_range(start=date_min.to_period('Y').to_timestamp(), end=date_max, freq='YS') # YS = Year Start
         tickvals = years
         ticktext = [d.strftime('%Y') for d in years]
     
     elif view_mode == "每半年":
-        half_years = pd.date_range(start=date_min, end=date_max, freq='6MS') # 每6個月的開始
+        half_years = pd.date_range(start=date_min, end=date_max, freq='6MS') # 6MS = 6 Month Start
         tickvals = half_years
         for d in half_years:
             half = "H1" if d.month <= 6 else "H2"
             ticktext.append(f"{d.year}-{half}")
 
     elif view_mode == "每季":
-        quarters = pd.date_range(start=date_min, end=date_max, freq='QS') # 每季的開始
+        quarters = pd.date_range(start=date_min, end=date_max, freq='QS') # QS = Quarter Start
         tickvals = quarters
         ticktext = [f"{d.year}-Q{d.quarter}" for d in quarters]
 
     elif view_mode == "每周":
+        # W-MON 表示以週一為每週的開始
         mondays = pd.date_range(start=date_min - pd.to_timedelta(date_min.weekday(), unit='d'), end=date_max, freq='W-MON')
         tickvals = mondays
         ticktext = [d.strftime('%Y-%m-%d') for d in mondays]
 
-    if not tickvals: # 如果列表為空 (例如時間範圍太短)，返回 None
+    # --- 關鍵修正 ---
+    # 舊的寫法 `if not tickvals:` 會對 DatetimeIndex 產生歧義，導致錯誤
+    # 新的寫法 `if len(tickvals) == 0:` 明確檢查物件長度，安全可靠
+    if len(tickvals) == 0:
         return None, None
         
     return tickvals, ticktext
@@ -108,10 +117,10 @@ def create_gantt_chart(df, view_mode):
             y=milestones_df['Task'],
             mode='markers',
             marker=dict(
-                symbol='diamond', # 使用鑽石符號
-                color='red',      # 顏色設為紅色
-                size=12,          # 符號大小
-                line=dict(color='black', width=1) # 黑色外框
+                symbol='diamond',
+                color='red',
+                size=12,
+                line=dict(color='black', width=1)
             ),
             name='里程碑',
             hoverinfo='text',
@@ -122,7 +131,7 @@ def create_gantt_chart(df, view_mode):
     fig.update_layout(
         xaxis_title="日期",
         yaxis_title="專案任務",
-        yaxis={'categoryorder':'array', 'categoryarray': df['Task'].tolist()}, # 保持排序
+        yaxis={'categoryorder':'array', 'categoryarray': df['Task'].tolist()},
         title_font_size=24,
         font_size=14,
         hoverlabel=dict(bgcolor="white", font_size=12),
@@ -130,14 +139,19 @@ def create_gantt_chart(df, view_mode):
     )
     
     # 加上標示今天日期的紅色垂直線
-    fig.add_shape(
-        type="line",
-        x0=datetime.now(), y0=0,
-        x1=datetime.now(), y1=1,
-        yref="paper",
-        line=dict(color="Red", width=2, dash="dash"),
-        name="今天"
-    )
+    # 使用 try-except 以防伺服器時間與本地時間有格式問題
+    try:
+        today_date = datetime.now()
+        fig.add_shape(
+            type="line",
+            x0=today_date, y0=0,
+            x1=today_date, y1=1,
+            yref="paper",
+            line=dict(color="Red", width=2, dash="dash"),
+            name="今天"
+        )
+    except Exception as e:
+        st.warning(f"無法標示當天日期: {e}")
     
     # 應用動態時間軸格式
     tickvals, ticktext = get_dynamic_tick_format(df, view_mode)
@@ -148,24 +162,28 @@ def create_gantt_chart(df, view_mode):
             tickvals=tickvals,
             ticktext=ticktext
         )
-    else: # 如果沒有客製化格式，使用預設
+    else: # 如果沒有客製化格式 (例如選了"每日"或時間範圍太小)，使用預設
         fig.update_xaxes(rangeslider_visible=True)
 
     return fig
 
 # --- 主應用程式流程 ---
 
-# 1. 檔案上傳
 st.sidebar.header("1. 上傳您的 CSV 檔案")
 uploaded_file = st.sidebar.file_uploader("請選擇一個 CSV 檔案", type=["csv"])
 
 if uploaded_file is not None:
     try:
-        df = pd.read_csv(uploaded_file)
-        df_processed = preprocess_data(df)
+        df_original = pd.read_csv(uploaded_file)
+        
+        # 進行資料預處理
+        df_processed = preprocess_data(df_original.copy())
 
         st.success("CSV 檔案上傳並處理成功！")
-        st.dataframe(df_processed.head())
+        
+        # 顯示處理後的前幾筆資料以供預覽
+        st.subheader("資料預覽 (已排序)")
+        st.dataframe(df_processed[['Task', 'Project', 'Type', 'Start', 'Finish']].head())
 
         # 2. 時間軸切換
         st.sidebar.header("2. 甘特圖設定")
@@ -195,8 +213,14 @@ if uploaded_file is not None:
 
         # 超時 (已過期但未完成 或 遞交日晚於結束日)
         overdue_tasks = df_processed[
-            ((df_processed['Finish'] < today) & (df_processed['Completion_Date'].isnull())) |
-            (df_processed['Completion_Date'] > df_processed['Finish'])
+            (
+                (df_processed['Finish'] < today) & (df_processed['Completion_Date'].isnull())
+            ) |
+            (
+                # 確保 'Completion_Date' 和 'Finish' 都是有效的日期才能比較
+                pd.notnull(df_processed['Completion_Date']) & pd.notnull(df_processed['Finish']) &
+                (df_processed['Completion_Date'] > df_processed['Finish'])
+            )
         ].drop_duplicates()
 
         col1, col2 = st.columns(2)
