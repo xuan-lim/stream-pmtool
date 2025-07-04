@@ -12,28 +12,36 @@ st.set_page_config(
 )
 
 st.title("📊 互動式專案管理甘特圖")
-st.write("上傳您的專案管理 CSV 檔案，即可生成互動式甘特圖，並追蹤專案進度。")
+# --- 修改：更新說明文字 ---
+st.write("上傳您的專案管理 CSV 檔案，即可生成互動式甘特圖。可選欄位 `Status` (填入 Closed/In process/Not start) 來追蹤專案進度。")
 
 # --- 函式定義 ---
 
 def preprocess_data(df):
     """
-    資料預處理：轉換日期格式、建立排序鍵。
+    資料預處理：轉換日期格式、建立排序鍵、處理狀態欄位。
     """
     # 轉換日期格式
     for col in ['Start', 'Finish', 'Completion_Date']:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
 
-    # 建立排序邏輯
-    # 1. 母專案 -> 2. 子專案 -> 3. 里程碑
-    type_order = {'母專案': 1, '子專案': 2, '里程碑': 3}
-    df['TypeOrder'] = df['Type'].map(type_order).fillna(4) # 未定義的類型排最後
+    # --- 新增：處理 Status 欄位 ---
+    if 'Status' in df.columns:
+        # 將空白的狀態值填補為'未定義'
+        df['Status'] = df['Status'].fillna('未定義')
+    else:
+        # 如果沒有 Status 欄位，則新增一個並全部設為'未定義'
+        df['Status'] = '未定義'
 
-    # 排序：先依母專案，再依類型順序，最後依開始日期
+    # 建立排序邏輯
+    type_order = {'母專案': 1, '子專案': 2, '里程碑': 3}
+    df['TypeOrder'] = df['Type'].map(type_order).fillna(4)
+
+    # 排序
     df = df.sort_values(by=['Project', 'TypeOrder', 'Start'], ascending=[True, True, True]).reset_index(drop=True)
 
-    # 將任務名稱設定為 Categorical，強制 Plotly 遵循此順序
+    # 將任務名稱設定為 Categorical
     df['Task'] = pd.Categorical(df['Task'], categories=df['Task'].unique(), ordered=True)
     
     return df
@@ -70,30 +78,62 @@ def get_dynamic_tick_format(df, view_mode):
         return None, None
     return tickvals, ticktext
 
-def create_gantt_chart(df, view_mode):
+# --- 修改：函式簽名，增加 color_mode 參數 ---
+def create_gantt_chart(df, view_mode, color_mode):
     """
-    生成甘特圖，並將里程碑以符號標示。
+    生成甘特圖，並可根據專案或進度狀態來區分顏色。
     """
     if df.empty:
-        # 即使是空的，也返回一個空的 Figure 物件，避免錯誤
         st.warning("篩選後無資料可顯示。")
         return go.Figure()
 
     tasks_df = df[df['Type'] != '里程碑'].copy()
     milestones_df = df[df['Type'] == '里程碑'].copy()
+    
+    # --- 新增：定義進度狀態的顏色 ---
+    status_color_map = {
+        'Closed': 'rgb(76, 175, 80)',      # 綠色
+        'In process': 'rgb(255, 152, 0)',  # 橘色
+        'Not start': 'rgb(189, 189, 189)', # 灰色
+        '未定義': 'rgb(158, 158, 158)'       # 深灰色
+    }
+
+    # --- 修改：根據 color_mode 決定 timeline 的顏色參數 ---
+    if color_mode == '依進度狀態區分顏色':
+        color_arg = 'Status'
+        color_map_arg = status_color_map
+    else: # 預設依專案區分顏色
+        color_arg = 'Project'
+        color_map_arg = None
 
     fig = px.timeline(
         tasks_df, x_start="Start", x_end="Finish", y="Task",
-        color="Project", hover_name="Task", title="專案時程甘特圖", text="Task"
+        color=color_arg,
+        color_discrete_map=color_map_arg,
+        hover_name="Task",
+        custom_data=['Project', 'Status'], # 加入自訂資料以供懸停提示使用
+        title="專案時程甘特圖"
     )
-    fig.update_traces(textposition='inside')
+
+    # --- 修改：統一更新懸停提示的格式 ---
+    fig.update_traces(
+        textposition='inside',
+        hovertemplate=(
+            "<b>%{y}</b><br>"
+            "專案: %{custom_data[0]}<br>"
+            "狀態: %{custom_data[1]}<br>"
+            "開始: %{x[0]|%Y-%m-%d}<br>"
+            "結束: %{x[1]|%Y-%m-%d}"
+            "<extra></extra>" # 隱藏多餘的 trace name
+        )
+    )
 
     if not milestones_df.empty:
         fig.add_trace(go.Scatter(
             x=milestones_df['Start'], y=milestones_df['Task'], mode='markers',
             marker=dict(symbol='diamond', color='red', size=12, line=dict(color='black', width=1)),
             name='里程碑', hoverinfo='text',
-            hovertext=[f"<b>{row.Task}</b><br>日期: {row.Start.strftime('%Y-%m-%d')}<br>專案: {row.Project}" for _, row in milestones_df.iterrows()]
+            hovertext=[f"<b>{row.Task}</b><br>日期: {row.Start.strftime('%Y-%m-%d')}<br>專案: {row.Project}<br>狀態: {row.Status}" for _, row in milestones_df.iterrows()]
         ))
 
     num_tasks = len(df['Task'].unique())
@@ -101,14 +141,12 @@ def create_gantt_chart(df, view_mode):
 
     fig.update_layout(
         height=chart_height, xaxis_title="日期", yaxis_title="專案任務",
-        # 此處的 df['Task'].cat.categories 現在會是「清理過」的類別列表
         yaxis={'categoryorder':'array', 'categoryarray': df['Task'].cat.categories.tolist()},
         title_font_size=24, font_size=14, hoverlabel=dict(bgcolor="white", font_size=12),
         legend_title_text='圖例'
     )
     
     try:
-        # 使用台灣時區
         today_date = datetime.now()
         fig.add_shape(type="line", x0=today_date, y0=0, x1=today_date, y1=1, yref="paper", line=dict(color="Red", width=2, dash="dash"))
     except Exception as e:
@@ -141,13 +179,9 @@ if uploaded_file is not None:
         )
 
         df_filtered = df_processed.copy()
-
         if filter_mode == "只顯示母專案":
             df_filtered = df_processed[df_processed['Type'] == '母專案'].copy()
-            # --- 主要修正(1/2) ---
-            # 移除 Task 類別中未使用的項目，確保 Y 軸只顯示母專案
             df_filtered['Task'] = df_filtered['Task'].cat.remove_unused_categories()
-        
         elif filter_mode == "依母專案篩選":
             parent_projects = df_processed[df_processed['Type'] == '母專案']['Project'].unique().tolist()
             if parent_projects:
@@ -158,11 +192,8 @@ if uploaded_file is not None:
                 )
                 if selected_projects:
                     df_filtered = df_processed[df_processed['Project'].isin(selected_projects)].copy()
-                    # --- 主要修正(2/2) ---
-                    # 同樣地，在此處也移除未使用的 Task 類別
                     df_filtered['Task'] = df_filtered['Task'].cat.remove_unused_categories()
                 else:
-                    # 使用空的 DataFrame 並定義欄位以避免後續出錯
                     df_filtered = pd.DataFrame(columns=df_processed.columns)
                     df_filtered['Task'] = pd.Categorical(df_filtered['Task'])
             else:
@@ -176,25 +207,37 @@ if uploaded_file is not None:
             index=1
         )
         
+        # --- 新增：顏色模式選擇 ---
+        color_mode_options = ['依專案區分顏色']
+        # 只有當 Status 欄位存在且不全為'未定義'時，才提供依進度區分顏色的選項
+        if 'Status' in df_filtered.columns and not df_filtered['Status'].eq('未定義').all():
+            color_mode_options.append('依進度狀態區分顏色')
+        
+        color_mode = st.sidebar.selectbox(
+            "選擇顏色模式",
+            options=color_mode_options,
+            index=0
+        )
+
         st.subheader("資料預覽 (根據篩選結果)")
         if not df_filtered.empty:
-            st.dataframe(df_filtered[['Task', 'Project', 'Type', 'Start', 'Finish']].head())
+            preview_cols = ['Task', 'Project', 'Type', 'Status', 'Start', 'Finish']
+            st.dataframe(df_filtered[[col for col in preview_cols if col in df_filtered.columns]].head())
         else:
             st.info("目前篩選條件下沒有資料可顯示。")
 
-        gantt_chart = create_gantt_chart(df_filtered, view_mode)
+        # --- 修改：傳入 color_mode 參數 ---
+        gantt_chart = create_gantt_chart(df_filtered, view_mode, color_mode)
         st.plotly_chart(gantt_chart, use_container_width=True)
 
         st.header("專案狀態追蹤 (根據篩選結果)")
         if not df_filtered.empty:
             today = pd.to_datetime(datetime.now().date())
-            
             upcoming_tasks = df_filtered[
                 (df_filtered['Finish'] >= today) & 
                 (df_filtered['Finish'] <= today + timedelta(days=7)) &
                 (df_filtered['Completion_Date'].isnull())
             ]
-
             overdue_tasks = df_filtered[
                 ((df_filtered['Finish'] < today) & (df_filtered['Completion_Date'].isnull())) |
                 (pd.notnull(df_filtered['Completion_Date']) & pd.notnull(df_filtered['Finish']) &
@@ -205,13 +248,13 @@ if uploaded_file is not None:
             with col1:
                 st.subheader("⚠️ 即將到期的項目 (未來7天)")
                 if not upcoming_tasks.empty:
-                    st.dataframe(upcoming_tasks[['Task', 'Project', 'Finish']].rename(columns={'Finish': '預計結束日'}))
+                    st.dataframe(upcoming_tasks[['Task', 'Project', 'Status', 'Finish']].rename(columns={'Finish': '預計結束日'}))
                 else:
                     st.info("目前沒有即將到期的項目。")
             with col2:
                 st.subheader("🚨 已超時的項目")
                 if not overdue_tasks.empty:
-                    st.dataframe(overdue_tasks[['Task', 'Project', 'Finish', 'Completion_Date']].rename(columns={'Finish': '預計結束日', 'Completion_Date': '實際遞交日'}))
+                    st.dataframe(overdue_tasks[['Task', 'Project', 'Status', 'Finish', 'Completion_Date']].rename(columns={'Finish': '預計結束日', 'Completion_Date': '實際遞交日'}))
                 else:
                     st.info("恭喜！目前沒有超時的項目。")
         else:
@@ -219,6 +262,6 @@ if uploaded_file is not None:
 
     except Exception as e:
         st.error(f"處理檔案時發生錯誤：{e}")
-        st.warning("請確認您的 CSV 檔案格式是否正確，特別是日期欄位 (YYYY-MM-DD) 以及 'Task', 'Start', 'Finish', 'Project', 'Type' 欄位是否存在。")
+        st.warning("請確認您的 CSV 檔案格式是否正確，特別是日期欄位 (YYYY-MM-DD) 以及 'Task', 'Start', 'Finish', 'Project', 'Type' 欄位是否存在。也請檢查選用的 `Status` 欄位。")
 else:
     st.info("請在左側側邊欄上傳您的專案 CSV 檔案以開始。")
