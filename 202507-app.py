@@ -31,7 +31,7 @@ def preprocess_data(df):
     df['TypeOrder'] = df['Type'].map(type_order).fillna(4) # 未定義的類型排最後
 
     # 排序：先依母專案，再依類型順序，最後依開始日期
-    df = df.sort_values(by=['Project', 'TypeOrder', 'Start'], ascending=[True, True, True])
+    df = df.sort_values(by=['Project', 'TypeOrder', 'Start'], ascending=[True, True, True]).reset_index(drop=True)
 
     # 將任務名稱設定為 Categorical，強制 Plotly 遵循此順序
     df['Task'] = pd.Categorical(df['Task'], categories=df['Task'].unique(), ordered=True)
@@ -75,6 +75,7 @@ def create_gantt_chart(df, view_mode):
     生成甘特圖，並將里程碑以符號標示。
     """
     if df.empty:
+        # 即使是空的，也返回一個空的 Figure 物件，避免錯誤
         st.warning("篩選後無資料可顯示。")
         return go.Figure()
 
@@ -100,12 +101,14 @@ def create_gantt_chart(df, view_mode):
 
     fig.update_layout(
         height=chart_height, xaxis_title="日期", yaxis_title="專案任務",
+        # 此處的 df['Task'].cat.categories 現在會是「清理過」的類別列表
         yaxis={'categoryorder':'array', 'categoryarray': df['Task'].cat.categories.tolist()},
         title_font_size=24, font_size=14, hoverlabel=dict(bgcolor="white", font_size=12),
         legend_title_text='圖例'
     )
     
     try:
+        # 使用台灣時區
         today_date = datetime.now()
         fig.add_shape(type="line", x0=today_date, y0=0, x1=today_date, y1=1, yref="paper", line=dict(color="Red", width=2, dash="dash"))
     except Exception as e:
@@ -130,7 +133,6 @@ if uploaded_file is not None:
         df_processed = preprocess_data(df_original.copy())
         st.success("CSV 檔案上傳並處理成功！")
 
-        # --- 新增區塊：專案篩選器 ---
         st.sidebar.header("2. 篩選專案")
         filter_mode = st.sidebar.selectbox(
             "選擇顯示模式",
@@ -138,10 +140,13 @@ if uploaded_file is not None:
             index=0
         )
 
-        df_filtered = df_processed.copy() # 預設為顯示全部
+        df_filtered = df_processed.copy()
 
         if filter_mode == "只顯示母專案":
             df_filtered = df_processed[df_processed['Type'] == '母專案'].copy()
+            # --- 主要修正(1/2) ---
+            # 移除 Task 類別中未使用的項目，確保 Y 軸只顯示母專案
+            df_filtered['Task'] = df_filtered['Task'].cat.remove_unused_categories()
         
         elif filter_mode == "依母專案篩選":
             parent_projects = df_processed[df_processed['Type'] == '母專案']['Project'].unique().tolist()
@@ -153,13 +158,17 @@ if uploaded_file is not None:
                 )
                 if selected_projects:
                     df_filtered = df_processed[df_processed['Project'].isin(selected_projects)].copy()
+                    # --- 主要修正(2/2) ---
+                    # 同樣地，在此處也移除未使用的 Task 類別
+                    df_filtered['Task'] = df_filtered['Task'].cat.remove_unused_categories()
                 else:
-                    df_filtered = pd.DataFrame() # 如果沒有選擇任何專案，則顯示空表
+                    # 使用空的 DataFrame 並定義欄位以避免後續出錯
+                    df_filtered = pd.DataFrame(columns=df_processed.columns)
+                    df_filtered['Task'] = pd.Categorical(df_filtered['Task'])
             else:
                 st.sidebar.warning("檔案中沒有找到任何『母專案』。")
-                df_filtered = pd.DataFrame()
+                df_filtered = pd.DataFrame(columns=df_processed.columns)
 
-        # --- 修改：側邊欄標題編號調整 ---
         st.sidebar.header("3. 甘特圖設定")
         view_mode = st.sidebar.selectbox(
             "選擇時間軸視野",
@@ -167,18 +176,15 @@ if uploaded_file is not None:
             index=1
         )
         
-        # --- 修改：所有後續顯示和計算都使用 df_filtered ---
         st.subheader("資料預覽 (根據篩選結果)")
         if not df_filtered.empty:
             st.dataframe(df_filtered[['Task', 'Project', 'Type', 'Start', 'Finish']].head())
         else:
             st.info("目前篩選條件下沒有資料可顯示。")
 
-        # 生成並顯示甘特圖
         gantt_chart = create_gantt_chart(df_filtered, view_mode)
         st.plotly_chart(gantt_chart, use_container_width=True)
 
-        # 顯示即將到期與超時的項目
         st.header("專案狀態追蹤 (根據篩選結果)")
         if not df_filtered.empty:
             today = pd.to_datetime(datetime.now().date())
