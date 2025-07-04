@@ -127,8 +127,15 @@ def create_gantt_chart(df, view_mode):
             hovertext=[f"<b>{row.Task}</b><br>日期: {row.Start.strftime('%Y-%m-%d')}<br>專案: {row.Project}" for index, row in milestones_df.iterrows()]
         ))
 
+    # --- 新增：動態計算圖表高度 ---
+    # 根據任務數量動態調整圖表高度，避免任務過多時圖表過於擁擠
+    # 設定每個任務至少佔用 35 像素，並設定一個最小高度 600 像素
+    num_tasks = len(df['Task'].unique())
+    chart_height = max(600, num_tasks * 35)
+
     # 更新整體圖表佈局
     fig.update_layout(
+        height=chart_height,  # <-- 主要修改：應用計算出的高度
         xaxis_title="日期",
         yaxis_title="專案任務",
         yaxis={'categoryorder':'array', 'categoryarray': df['Task'].tolist()},
