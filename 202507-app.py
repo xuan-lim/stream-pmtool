@@ -12,36 +12,38 @@ st.set_page_config(
 )
 
 st.title("📊 互動式專案管理甘特圖")
-# --- 修改：更新說明文字 ---
 st.write("上傳您的專案管理 CSV 檔案，即可生成互動式甘特圖。可選欄位 `Status` (填入 Closed/In process/Not start) 來追蹤專案進度。")
 
 # --- 函式定義 ---
 
 def preprocess_data(df):
     """
-    資料預處理：轉換日期格式、建立排序鍵、處理狀態欄位。
+    資料預處理：轉換日期格式、建立排序鍵、並計算進度。
     """
-    # 轉換日期格式
     for col in ['Start', 'Finish', 'Completion_Date']:
         if col in df.columns:
             df[col] = pd.to_datetime(df[col], errors='coerce')
 
-    # --- 新增：處理 Status 欄位 ---
     if 'Status' in df.columns:
-        # 將空白的狀態值填補為'未定義'
         df['Status'] = df['Status'].fillna('未定義')
     else:
-        # 如果沒有 Status 欄位，則新增一個並全部設為'未定義'
         df['Status'] = '未定義'
+    
+    # --- 新增：將狀態 mapping 到百分比 ---
+    progress_map = {'Closed': 1.0, 'In process': 0.5, 'Not start': 0.0, '未定義': 0.0}
+    df['Progress'] = df['Status'].map(progress_map).fillna(0.0)
 
-    # 建立排序邏輯
+    # --- 新增：計算進度條的結束日期 ---
+    # 確保 Start 和 Finish 是日期時間格式且非空才能計算
+    mask = df['Start'].notna() & df['Finish'].notna() & (df['Type'] != '里程碑')
+    # 使用 .loc 來避免 SettingWithCopyWarning
+    df.loc[mask, 'Progress_Finish'] = df.loc[mask, 'Start'] + \
+        (df.loc[mask, 'Finish'] - df.loc[mask, 'Start']) * df.loc[mask, 'Progress']
+
     type_order = {'母專案': 1, '子專案': 2, '里程碑': 3}
     df['TypeOrder'] = df['Type'].map(type_order).fillna(4)
 
-    # 排序
     df = df.sort_values(by=['Project', 'TypeOrder', 'Start'], ascending=[True, True, True]).reset_index(drop=True)
-
-    # 將任務名稱設定為 Categorical
     df['Task'] = pd.Categorical(df['Task'], categories=df['Task'].unique(), ordered=True)
     
     return df
@@ -65,23 +67,22 @@ def get_dynamic_tick_format(df, view_mode):
         tickvals, ticktext = years, [d.strftime('%Y') for d in years]
     elif view_mode == "每半年":
         half_years = pd.date_range(start=date_min, end=date_max, freq='6MS')
-        tickvals = half_years
-        ticktext = [f"{d.year}-H{1 if d.month <= 6 else 2}" for d in half_years]
+        tickvals, ticktext = [d for d in half_years], [f"{d.year}-H{1 if d.month <= 6 else 2}" for d in half_years]
     elif view_mode == "每季":
         quarters = pd.date_range(start=date_min, end=date_max, freq='QS')
-        tickvals, ticktext = quarters, [f"{d.year}-Q{d.quarter}" for d in quarters]
+        tickvals, ticktext = [d for d in quarters], [f"{d.year}-Q{d.quarter}" for d in quarters]
     elif view_mode == "每周":
         mondays = pd.date_range(start=date_min - pd.to_timedelta(date_min.weekday(), unit='d'), end=date_max, freq='W-MON')
-        tickvals, ticktext = mondays, [d.strftime('%Y-%m-%d') for d in mondays]
+        tickvals, ticktext = [d for d in mondays], [d.strftime('%Y-%m-%d') for d in mondays]
 
     if len(tickvals) == 0:
         return None, None
     return tickvals, ticktext
 
-# --- 修改：函式簽名，增加 color_mode 參數 ---
-def create_gantt_chart(df, view_mode, color_mode):
+# --- 主要修改：重構整個圖表生成函式 ---
+def create_gantt_chart(df, view_mode):
     """
-    生成甘特圖，並可根據專案或進度狀態來區分顏色。
+    生成帶有進度條的甘特圖。
     """
     if df.empty:
         st.warning("篩選後無資料可顯示。")
@@ -90,60 +91,75 @@ def create_gantt_chart(df, view_mode, color_mode):
     tasks_df = df[df['Type'] != '里程碑'].copy()
     milestones_df = df[df['Type'] == '里程碑'].copy()
     
-    # --- 新增：定義進度狀態的顏色 ---
-    status_color_map = {
-        'Closed': 'rgb(76, 175, 80)',      # 綠色
-        'In process': 'rgb(255, 152, 0)',  # 橘色
-        'Not start': 'rgb(189, 189, 189)', # 灰色
-        '未定義': 'rgb(158, 158, 158)'       # 深灰色
-    }
+    fig = go.Figure()
+    
+    # 1. 繪製底層的灰色背景長條 (代表完整工期)
+    fig.add_trace(go.Bar(
+        y=tasks_df['Task'],
+        x=tasks_df['Finish'] - tasks_df['Start'],
+        base=tasks_df['Start'],
+        orientation='h',
+        marker_color='#E0E0E0', # 淺灰色
+        name='預計工期',
+        hoverinfo='none',
+        text="", # 避免顯示文字
+    ))
 
-    # --- 修改：根據 color_mode 決定 timeline 的顏色參數 ---
-    if color_mode == '依進度狀態區分顏色':
-        color_arg = 'Status'
-        color_map_arg = status_color_map
-    else: # 預設依專案區分顏色
-        color_arg = 'Project'
-        color_map_arg = None
+    # 2. 繪製上層的彩色進度長條 (依專案分色)
+    projects = tasks_df['Project'].unique()
+    colors = px.colors.qualitative.Plotly
 
-    fig = px.timeline(
-        tasks_df, x_start="Start", x_end="Finish", y="Task",
-        color=color_arg,
-        color_discrete_map=color_map_arg,
-        hover_name="Task",
-        custom_data=['Project', 'Status'], # 加入自訂資料以供懸停提示使用
-        title="專案時程甘特圖"
-    )
+    for i, project in enumerate(projects):
+        project_df = tasks_df[tasks_df['Project'] == project]
+        progress_df = project_df[project_df['Progress'] > 0] # 只繪製有進度的部分
 
-    # --- 修改：統一更新懸停提示的格式 ---
-    fig.update_traces(
-        textposition='inside',
-        hovertemplate=(
-            "<b>%{y}</b><br>"
-            "專案: %{custom_data[0]}<br>"
-            "狀態: %{custom_data[1]}<br>"
-            "開始: %{x[0]|%Y-%m-%d}<br>"
-            "結束: %{x[1]|%Y-%m-%d}"
-            "<extra></extra>" # 隱藏多餘的 trace name
-        )
-    )
+        if not progress_df.empty:
+            fig.add_trace(go.Bar(
+                y=progress_df['Task'],
+                x=progress_df['Progress_Finish'] - progress_df['Start'],
+                base=progress_df['Start'],
+                orientation='h',
+                marker_color=colors[i % len(colors)],
+                name=project,
+                text=progress_df.apply(lambda row: f"{row['Progress']:.0%}", axis=1),
+                textposition='inside',
+                insidetextanchor='middle',
+                hovertemplate=(
+                    "<b>%{y}</b><br>"
+                    "專案: %{customdata[0]}<br>"
+                    "狀態: %{customdata[1]}<br>"
+                    "開始: %{customdata[2]|%Y-%m-%d}<br>"
+                    "結束: %{customdata[3]|%Y-%m-%d}<br>"
+                    "進度: %{text}"
+                    "<extra></extra>"
+                ),
+                customdata=progress_df[['Project', 'Status', 'Start', 'Finish']]
+            ))
 
+    # 3. 加上里程碑
     if not milestones_df.empty:
         fig.add_trace(go.Scatter(
             x=milestones_df['Start'], y=milestones_df['Task'], mode='markers',
             marker=dict(symbol='diamond', color='red', size=12, line=dict(color='black', width=1)),
-            name='里程碑', hoverinfo='text',
-            hovertext=[f"<b>{row.Task}</b><br>日期: {row.Start.strftime('%Y-%m-%d')}<br>專案: {row.Project}<br>狀態: {row.Status}" for _, row in milestones_df.iterrows()]
+            name='里程碑',
+            hovertemplate="<b>%{y}</b><br>日期: %{x|%Y-%m-%d}<extra></extra>"
         ))
 
     num_tasks = len(df['Task'].unique())
     chart_height = max(600, num_tasks * 35)
 
+    # 4. 更新整體圖表佈局
     fig.update_layout(
-        height=chart_height, xaxis_title="日期", yaxis_title="專案任務",
-        yaxis={'categoryorder':'array', 'categoryarray': df['Task'].cat.categories.tolist()},
-        title_font_size=24, font_size=14, hoverlabel=dict(bgcolor="white", font_size=12),
-        legend_title_text='圖例'
+        height=chart_height,
+        title_text="專案時程進度甘特圖",
+        xaxis_title="日期",
+        yaxis_title="專案任務",
+        yaxis={'categoryorder':'array', 'categoryarray': df['Task'].cat.categories.tolist(), 'autorange': 'reversed'},
+        barmode='stack', # 堆疊模式，讓進度條疊在背景條之上
+        legend_title_text='圖例',
+        hoverlabel=dict(bgcolor="white", font_size=12),
+        title_font_size=24,
+        font_size=14,
     )
     
     try:
@@ -207,17 +223,7 @@ if uploaded_file is not None:
             index=1
         )
         
-        # --- 新增：顏色模式選擇 ---
-        color_mode_options = ['依專案區分顏色']
-        # 只有當 Status 欄位存在且不全為'未定義'時，才提供依進度區分顏色的選項
-        if 'Status' in df_filtered.columns and not df_filtered['Status'].eq('未定義').all():
-            color_mode_options.append('依進度狀態區分顏色')
-        
-        color_mode = st.sidebar.selectbox(
-            "選擇顏色模式",
-            options=color_mode_options,
-            index=0
-        )
+        # --- 移除：顏色模式選擇功能已移除 ---
 
         st.subheader("資料預覽 (根據篩選結果)")
         if not df_filtered.empty:
@@ -225,9 +231,9 @@ if uploaded_file is not None:
             st.dataframe(df_filtered[[col for col in preview_cols if col in df_filtered.columns]].head())
         else:
             st.info("目前篩選條件下沒有資料可顯示。")
-
-        # --- 修改：傳入 color_mode 參數 ---
-        gantt_chart = create_gantt_chart(df_filtered, view_mode, color_mode)
+        
+        # --- 修改：呼叫新的圖表函式 ---
+        gantt_chart = create_gantt_chart(df_filtered, view_mode)
         st.plotly_chart(gantt_chart, use_container_width=True)
 
         st.header("專案狀態追蹤 (根據篩選結果)")
